@@ -1,7 +1,9 @@
 import os
 import itertools
+import cv2
 import time
 import codecs
+import random
 import re
 import datetime
 import cairocffi as cairo
@@ -35,6 +37,72 @@ data_folder_name = "words"
 np.random.seed(54)
 
 ###HELPER FUNCTIONS###
+
+#Split an image into text lines
+def getLines(image_name):
+    ## Convert from RGB to gray
+    img = cv2.imread(image_name)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    #cv2.imshow("", gray)
+    #cv2.waitKey()
+    
+    ## Convert to binary image
+    th, threshed = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY_INV|cv2.THRESH_OTSU)
+    
+    
+    ## Calculate rotated image
+    # pts = cv2.findNonZero(threshed)
+    # ret = cv2.minAreaRect(pts)
+    # 
+    # (cx,cy), (w,h), ang = ret
+    # if w>h:
+    #     w,h = h,w
+    #     ang += 90
+    # 
+    # M = cv2.getRotationMatrix2D((cx,cy), 50, 1.0)
+    # rotated = cv2.warpAffine(threshed, M, (img.shape[1], img.shape[0]))
+    rotated = threshed
+    # #cv2.imshow("", rotated)
+    # #cv2.waitKey()
+    
+    ## Draw upper and lower lines for each text line
+    hist = cv2.reduce(rotated,1, cv2.REDUCE_AVG).reshape(-1)
+    
+    th = 5
+    H,W = img.shape[:2]
+    uppers = [y-5 for y in range(H-1) if hist[y]<=th and hist[y+1]>th]
+    lowers = [y+5 for y in range(H-1) if hist[y]>th and hist[y+1]<=th]
+
+    
+    rotated = gray
+
+
+    
+    minDistance = 20
+    count = 0
+    croppedImages = []
+    for i in range(len(uppers)):
+        if(i >= len(lowers)):
+            continue
+            
+        if(uppers[i] < 0):
+            uppers[i] = 0
+        if(lowers[i] > H):
+            lowers[i] = H
+        tooClose = False
+
+        if lowers[i] - uppers[i] < minDistance:
+            tooClose = True
+            #print("too close")
+        if not tooClose:
+            croppedImages.append(rotated[uppers[i]:lowers[i],:])
+            #cv2.line(rotated, (0,uppers[i]), (W, uppers[i]), (255,0,0), 1)
+            #cv2.line(rotated, (0,lowers[i]), (W, lowers[i]), (0,255,0), 1)
+    if(len(croppedImages)) == 0:
+        return np.array([rotated])
+    #cv2.imwrite("result.png", rotated)
+    return np.array(croppedImages[0:len(croppedImages)])
+
 
 # this creates larger "blotches" of noise which look
 # more realistic than just adding gaussian noise
@@ -165,6 +233,7 @@ def ctc_lambda_func(args):
 def decode_batch(test_func, word_batch):
     out = test_func([word_batch])[0]
     ret = []
+    print(out.shape)
     for j in range(out.shape[0]):
         out_best = list(np.argmax(out[j, 2:], 1))
         out_best = [k for k, g in itertools.groupby(out_best)]
@@ -225,17 +294,20 @@ class TextImageGenerator(keras.callbacks.Callback):
 
 
     def initialize_data(self):
+        global numChanges
         print("Loading initial data, one-time operation")
         (im, l) = get_dataset_from(DatasetConfig())
         print(str(len(im)) + " files found")
         tmp_image_list = []
         tmp_output_list = []
-        for i in range(self.num_words):
+        
+        #reshape data
+        for i in range(int(self.num_words/numChanges)):
             if i % 100 == 0:
                 print(str(i) + "loaded")
-            image = imageio.imread(im[i])
-            #plt.imshow(image, cmap=plt.get_cmap("gray"))
-            #plt.show()
+            #image = imageio.imread(im[i])
+            image = getLines(im[i])[0]
+
             outputs = l[i].split('|')
             output = ""
             for o in outputs:
@@ -243,19 +315,62 @@ class TextImageGenerator(keras.callbacks.Callback):
                 output += " "
             output = output[:-1]
             factor = self.img_h/image.shape[0]
-            image = resize(image, (self.img_h, int(image.shape[1]*factor)))
+            #image = resize(image, (self.img_h, int(image.shape[1]*factor)))
+            image = cv2.resize(image, (int(image.shape[1]*factor), self.img_h))
+            
             difference = self.img_w-image.shape[1]
             if difference > 0:
                 image = np.pad(image, ((0,0),(int(difference/2), int(difference/2))), mode="maximum")
-            image = resize(image, (self.img_h, self.img_w))
+            image = cv2.resize(image, (self.img_w, self.img_h))
             image = np.swapaxes(image, 0, 1)
-            #print(image.shape)
-            tmp_image_list.append(image)
+            th, image = cv2.threshold(image, 127, 255, cv2.THRESH_BINARY|cv2.THRESH_OTSU)
+            #image = image / 255
+            #add normal image
+            tmp_image_list.append(image/255)
             tmp_output_list.append(output)
-            #plt.imshow(image, cmap=plt.get_cmap("gray"))
+            #plt.imshow((image/255).T,cmap="Greys_r")
+            #plt.show()
+            
+            #shrink image
+            shrinkFactor = random.uniform(.8, .9)
+            image = cv2.resize(image, (int(float(self.img_h)*shrinkFactor), int(float(self.img_w)*shrinkFactor)))
+            differenceW = self.img_w-image.shape[0]
+            differenceH = self.img_h-image.shape[1]
+            image = np.pad(image, ((int(differenceW/2),int(differenceW/2)),(int(differenceH/2), int(differenceH/2))), mode="maximum")
+            image=cv2.resize(image, (self.img_h, self.img_w))
+
+            #tmp_image_list.append(image)
+            #tmp_output_list.append(output)
+            #plt.imshow(image.T,cmap="Greys_r")
+            #plt.show()
+            
+            #apply rotation
+            th, image = cv2.threshold(image, 127, 255, cv2.THRESH_BINARY_INV|cv2.THRESH_OTSU)
+            pts = cv2.findNonZero(image)
+            ret = cv2.minAreaRect(pts)
+            (cx,cy), (w,h), ang = ret
+            if w>h:
+                w,h = h,w
+                ang += 90      
+            randAngle = random.uniform(-2, 2)
+            M = cv2.getRotationMatrix2D((cx,cy), randAngle, 1.0)
+            image = cv2.warpAffine(image, M, (image.shape[1], image.shape[0]))
+            image = cv2.resize(image, (self.img_h, self.img_w))
+
+            th, rotated = cv2.threshold(image, 127, 255, cv2.THRESH_BINARY_INV|cv2.THRESH_OTSU)
+            
+            #print(rotated.T)
+            #add rotated image to list
+            tmp_image_list.append(rotated/255)
+            tmp_output_list.append(output)
+            #plt.imshow(rotated.T,  cmap='Greys_r')
             #plt.show()            
 
-            
+        self.num_words = len(tmp_image_list)
+        words_per_epoch = len(tmp_image_list)
+        val_split = 0.2
+        val_words = int(words_per_epoch * (val_split))
+        self.val_split = (words_per_epoch - val_words)
         print("Initial data loaded")
         self.images_list = tmp_image_list
         self.l_list = tmp_output_list
@@ -269,13 +384,11 @@ class TextImageGenerator(keras.callbacks.Callback):
         
     #fills X_images, Y_data, and Y_len
     def build_image_list(self):
-        (im, l) = get_dataset_from(DatasetConfig())
         print("Num words:" + str(self.num_words))
         print("Training data size:" + str(self.val_split))
         print("Testing data size:" + str(self.num_words - self.val_split))
         assert self.num_words % self.minibatch_size == 0
         assert (self.val_split * self.num_words) % self.minibatch_size == 0
-        assert self.num_words <= len(im)
         self.image_list = [''] * self.num_words
         self.output_list = [''] * self.num_words
         tmp_image_list = []
@@ -436,7 +549,7 @@ class TextImageGenerator(keras.callbacks.Callback):
             #if out of train data
             if self.cur_train_index >= self.val_split:
                 #reset train index
-                self.cur_train_index = self.cur_train_index % 32
+                self.cur_train_index = self.cur_train_index % self.minibatch_size
                 #shuffle input data
                 self.shuffle_data()
             yield ret
@@ -446,7 +559,7 @@ class TextImageGenerator(keras.callbacks.Callback):
             ret = self.get_batch(self.cur_val_index, self.minibatch_size, train=False)
             self.cur_val_index += self.minibatch_size
             if self.cur_val_index >= self.num_words:
-                self.cur_val_index = self.val_split + self.cur_val_index % 32
+                self.cur_val_index = self.val_split + self.cur_val_index % self.minibatch_size
             yield ret
 
     def on_train_begin(self, logs={}):
@@ -552,15 +665,17 @@ def getModel(epoch, img_w):
 def train(start_epoch, stop_epoch, img_w, data_source, train_mode=True):
     global data_folder_name
     global test_func
+    global numChanges
+    numChanges=2
     run_name = datetime.datetime.now().strftime('models')
-    minibatch_size = 32
-    words_per_epoch = 11200
+    minibatch_size = 64
+    words_per_epoch = 11200*numChanges
     val_split = 0.2
     val_words = int(words_per_epoch * (val_split))
     step_count = (words_per_epoch - val_words) // minibatch_size
     
     # Input Parameters
-    img_h = 64
+    img_h = 32
     
     data_type = "handwritten"
     data_folder_name = data_source
@@ -571,7 +686,6 @@ def train(start_epoch, stop_epoch, img_w, data_source, train_mode=True):
     pool_size = 2
     time_dense_size = 32
     rnn_size = 512
-    minibatch_size = 32
     
     if K.image_data_format() == 'channels_first':
         input_shape = (1, img_w, img_h)
@@ -670,6 +784,7 @@ def train(start_epoch, stop_epoch, img_w, data_source, train_mode=True):
                         epochs=stop_epoch,
                         validation_data=img_gen.next_val(),
                         validation_steps=val_words // minibatch_size,
+                    
                         callbacks=[viz_cb, img_gen],
                         initial_epoch=start_epoch)
 
@@ -677,31 +792,43 @@ def runTraining(epochNumber):
     i = 0
     epochsPerTrain = 50;
     while True:
-        train(epochNumber+(i*epochsPerTrain), epochNumber+(i*epochsPerTrain)+epochsPerTrain, 512, "lines")
+        train(epochNumber+(i*epochsPerTrain), epochNumber+(i*epochsPerTrain)+epochsPerTrain, 1024, "words")
         i += 1
 
     
-def predict(image):
+def predict(image_name):
     #image parameters
-    img_h = 64
-    img_w = 512
-    model_name = 97
-    
-    factor = img_h/image.shape[0]
-    image = resize(image, (img_h, int(image.shape[1]*factor)))
-    difference = img_w-image.shape[1]
-    if difference > 0:
-        image = np.pad(image, ((0,0),(int(difference/2), int(difference/2))), mode="maximum")
-    image = resize(image, (img_h, img_w))
-    image = np.swapaxes(image, 0, 1)
-    image_list = np.reshape(np.array([image]), (1, img_w, img_h, 1))
-    test_func = getModel(model_name, img_w)
+    img_h = 32
+    img_w = 1024
+    model_name = 7
+    #test_func = getModel(model_name, img_w)
     print("Model loaded")
-    plt.subplot(1, 1, 1)
-    plt.imshow(image_list[0,:,:,0].T, cmap='Greys_r')
-    decoded_res = decode_batch(test_func, image_list[0:1])
-    plt.title("Guess: " + decoded_res[0])
-    plt.show()
+    image_lines = getLines(image_name)
+    print(image_lines.shape)
+    for image in image_lines:
+        factor = img_h/image.shape[0]
+        #image = resize(image, (self.img_h, int(image.shape[1]*factor)))
+        image = cv2.resize(image, (int(image.shape[1]*factor), img_h))
+        
+        difference = img_w-image.shape[1]
+        if difference > 0:
+            image = np.pad(image, ((0,0),(int(difference/2), int(difference/2))), mode="maximum")
+        image = cv2.resize(image, (img_w, img_h))
+        image = np.swapaxes(image, 0, 1)
+        th, image = cv2.threshold(image, 127, 255, cv2.THRESH_BINARY|cv2.THRESH_OTSU)
+        #image = image / 255
+        #add normal image
+        
+        image_list = np.reshape(np.array([image/255]), (1, img_w, img_h, 1))
+
+        plt.subplot(1, 1, 1)
+        plt.imshow(image_list[0,:,:,0].T, cmap='Greys_r')
+        plt.show()
+        #print("S:", image_list[0, :, :, 0].shape)
+        #decoded_res = decode_batch(test_func, image_list[0:1])
+        #plt.title("Guess: " + decoded_res[0])
+        #plt.show()
     K.clear_session()
     return decoded_res[0]
 
+#predict("sample.png")

@@ -20,7 +20,8 @@ CORS(app)
 
 
 def analyze(fname):
-    image = mpimg.imread(UPLOAD_FOLDER + "/" + fname)
+    image = UPLOAD_FOLDER + "/" + fname
+    #print(image.shape)
     value = ocr.predict(image)
     responseObject = dict()
     responseObject["value"] = [value]
